@@ -1,0 +1,6 @@
+id,date,category,description,amount,payment_method
+1,2026-05-05,Bills,,300,
+2,2026-05-05,Food,,300,
+3,2026-05-04,Food,,20,
+4,2026-05-05,Food,,20,
+5,2026-05-05,Food,,1,
