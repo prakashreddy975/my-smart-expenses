@@ -1,13 +1,11 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import axios from 'axios';
+import { api, setAuthToken, getStoredToken, clearStoredToken, persistToken } from './api';
 import { 
   PlusCircle, Wallet, History, PieChart as PieIcon, 
   Trash2, RefreshCw, Landmark, CreditCard, DollarSign, 
-  Receipt, TrendingUp, Edit3, Check, X, ShieldCheck, Tag, User, FileText 
+  Receipt, TrendingUp, Edit3, Check, X, ShieldCheck, Tag, User, FileText, LogOut
 } from 'lucide-react';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Legend } from 'recharts';
-
-const API = "http://127.0.0.1:5001/api";
 
 function App() {
   // --- DATA STATES ---
@@ -16,6 +14,16 @@ function App() {
   const [bills, setBills] = useState([]);
   const [analytics, setAnalytics] = useState({ total: 0, categories: {} });
   const [isSyncing, setIsSyncing] = useState(false);
+
+  const [user, setUser] = useState(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [authMode, setAuthMode] = useState('login');
+  const [authError, setAuthError] = useState('');
+  const [loginEmail, setLoginEmail] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [regEmail, setRegEmail] = useState('');
+  const [regPassword, setRegPassword] = useState('');
+  const [regPassword2, setRegPassword2] = useState('');
 
   // --- EDITING STATES ---
   const [editExpId, setEditExpId] = useState(null);
@@ -35,26 +43,94 @@ function App() {
     card_name: 'CC : Amex', bill_date: '', bill_amount: '', paid_amount: '', paid_date: '', from_bank: '' 
   });
 
-  // --- SYNC LOGIC ---
+  const logout = useCallback(() => {
+    clearStoredToken();
+    setAuthToken(null);
+    setUser(null);
+    setExpenses([]);
+    setBanks([]);
+    setBills([]);
+    setAnalytics({ total: 0, categories: {} });
+  }, []);
+
   const fetchData = useCallback(async () => {
     setIsSyncing(true);
     try {
       const t = Date.now();
       const [resExp, resAnl, resBnk, resBil] = await Promise.all([
-        axios.get(`${API}/expenses?_t=${t}`),
-        axios.get(`${API}/analytics?_t=${t}`),
-        axios.get(`${API}/banks?_t=${t}`),
-        axios.get(`${API}/bills?_t=${t}`)
+        api.get(`expenses?_t=${t}`),
+        api.get(`analytics?_t=${t}`),
+        api.get(`banks?_t=${t}`),
+        api.get(`bills?_t=${t}`)
       ]);
       setExpenses(resExp.data || []);
       setAnalytics(resAnl.data || { total: 0, categories: {} });
       setBanks(resBnk.data || []);
       setBills(resBil.data || []);
-    } catch (err) { console.error("Sync Failed"); }
+    } catch (err) {
+      if (err.response?.status === 401) logout();
+      console.error("Sync Failed");
+    }
     finally { setTimeout(() => setIsSyncing(false), 600); }
+  }, [logout]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const token = getStoredToken();
+    if (!token) {
+      setAuthToken(null);
+      setAuthReady(true);
+      return undefined;
+    }
+    setAuthToken(token);
+    api.get('auth/me')
+      .then((res) => { if (!cancelled) setUser(res.data); })
+      .catch(() => {
+        if (!cancelled) {
+          clearStoredToken();
+          setAuthToken(null);
+        }
+      })
+      .finally(() => { if (!cancelled) setAuthReady(true); });
+    return () => { cancelled = true; };
   }, []);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  useEffect(() => {
+    if (!user) return undefined;
+    fetchData();
+    return undefined;
+  }, [user, fetchData]);
+
+  const onLogin = async (e) => {
+    e.preventDefault();
+    setAuthError('');
+    try {
+      const { data } = await api.post('auth/login', { email: loginEmail.trim(), password: loginPassword });
+      persistToken(data.token);
+      setAuthToken(data.token);
+      setUser(data.user);
+      setLoginPassword('');
+    } catch (err) {
+      setAuthError(err.response?.data?.error || 'Sign in failed');
+    }
+  };
+
+  const onRegister = async (e) => {
+    e.preventDefault();
+    setAuthError('');
+    if (regPassword !== regPassword2) {
+      setAuthError('Passwords do not match');
+      return;
+    }
+    try {
+      const { data } = await api.post('auth/register', { email: regEmail.trim(), password: regPassword });
+      persistToken(data.token);
+      setAuthToken(data.token);
+      setUser(data.user);
+    } catch (err) {
+      setAuthError(err.response?.data?.error || 'Registration failed');
+    }
+  };
 
   // --- CALCULATIONS ---
   const totalBankSavings = banks.reduce((sum, b) => sum + parseFloat(b.balance || 0), 0);
@@ -64,38 +140,84 @@ function App() {
   // --- SUBMIT ACTIONS ---
   const handleExpenseSubmit = async (e) => {
     e.preventDefault();
-    await axios.post(`${API}/expenses`, { ...form, amount: parseFloat(form.amount) });
+    await api.post('expenses', { ...form, amount: parseFloat(form.amount) });
     setForm({ ...form, amount: '', description: '', payment_method: 'LIQ', category: 'Food' });
     fetchData();
   };
 
   const handleBankSubmit = async (e) => {
     e.preventDefault();
-    await axios.post(`${API}/banks`, { ...bankForm, balance: parseFloat(bankForm.balance) });
+    await api.post('banks', { ...bankForm, balance: parseFloat(bankForm.balance) });
     setBankForm({ bank_name: '', balance: '' });
     fetchData();
   };
 
   const handleBillSubmit = async (e) => {
     e.preventDefault();
-    await axios.post(`${API}/bills`, billForm);
+    await api.post('bills', billForm);
     setBillForm({ card_name: 'CC : Amex', bill_date: '', bill_amount: '', paid_amount: '', paid_date: '', from_bank: '' });
     fetchData();
   };
 
   // --- UPDATE ACTIONS ---
-  const saveEditExp = async () => { await axios.put(`${API}/expenses/${editExpId}`, editExpData); setEditExpId(null); fetchData(); };
-  const saveEditBank = async () => { await axios.put(`${API}/banks/${editBankId}`, editBankData); setEditBankId(null); fetchData(); };
-  const saveEditBill = async () => { await axios.put(`${API}/bills/${editBillId}`, editBillData); setEditBillId(null); fetchData(); };
+  const saveEditExp = async () => { await api.put(`expenses/${editExpId}`, editExpData); setEditExpId(null); fetchData(); };
+  const saveEditBank = async () => { await api.put(`banks/${editBankId}`, editBankData); setEditBankId(null); fetchData(); };
+  const saveEditBill = async () => { await api.put(`bills/${editBillId}`, editBillData); setEditBillId(null); fetchData(); };
 
   const deleteItem = async (type, id) => {
     if (!window.confirm("Permanently delete?")) return;
-    await axios.delete(`${API}/${type}/${id}`);
+    await api.delete(`${type}/${id}`);
     fetchData();
   };
 
   const COLORS = ['#4361EE', '#3A86FF', '#06D6A0', '#FFBE0B', '#FB5607', '#FF006E', '#8338EC', '#2EC4B6', '#E63946', '#8D99AE'];
   const chartData = Object.entries(analytics.categories || {}).map(([name, value]) => ({ name, value: parseFloat(value) || 0 }));
+
+  if (!authReady) {
+    return (
+      <div className="d-flex justify-content-center align-items-center text-muted" style={{ minHeight: '100vh', backgroundColor: '#f4f7fc' }}>
+        Loading…
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="d-flex align-items-center py-5" style={{ backgroundColor: '#f4f7fc', minHeight: '100vh' }}>
+        <div className="container" style={{ maxWidth: 420 }}>
+          <div className="card shadow-sm border-0 rounded-4">
+            <div className="card-body p-4">
+              <h4 className="fw-bold mb-1">Smart Expense Tracker</h4>
+              <p className="text-muted small mb-3">{authMode === 'login' ? 'Sign in with your email' : 'Create your account'}</p>
+              {authError ? <div className="alert alert-danger py-2 small mb-3">{authError}</div> : null}
+              {authMode === 'login' ? (
+                <form onSubmit={onLogin}>
+                  <label className="form-label small text-muted">Email</label>
+                  <input type="email" className="form-control form-control-sm mb-2" value={loginEmail} onChange={(e) => setLoginEmail(e.target.value)} required autoComplete="username" />
+                  <label className="form-label small text-muted">Password</label>
+                  <input type="password" className="form-control form-control-sm mb-3" value={loginPassword} onChange={(e) => setLoginPassword(e.target.value)} required autoComplete="current-password" />
+                  <button type="submit" className="btn btn-primary w-100 fw-bold rounded-3">Sign in</button>
+                </form>
+              ) : (
+                <form onSubmit={onRegister}>
+                  <label className="form-label small text-muted">Email</label>
+                  <input type="email" className="form-control form-control-sm mb-2" value={regEmail} onChange={(e) => setRegEmail(e.target.value)} required autoComplete="username" />
+                  <label className="form-label small text-muted">Password (8+ characters)</label>
+                  <input type="password" className="form-control form-control-sm mb-2" value={regPassword} onChange={(e) => setRegPassword(e.target.value)} required autoComplete="new-password" />
+                  <label className="form-label small text-muted">Confirm password</label>
+                  <input type="password" className="form-control form-control-sm mb-3" value={regPassword2} onChange={(e) => setRegPassword2(e.target.value)} required autoComplete="new-password" />
+                  <button type="submit" className="btn btn-primary w-100 fw-bold rounded-3">Create account</button>
+                </form>
+              )}
+              <button type="button" className="btn btn-link btn-sm w-100 mt-2" onClick={() => { setAuthMode(authMode === 'login' ? 'register' : 'login'); setAuthError(''); }}>
+                {authMode === 'login' ? 'Need an account? Register' : 'Have an account? Sign in'}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ backgroundColor: '#f4f7fc', minHeight: '100vh', paddingBottom: '60px' }}>
@@ -107,13 +229,18 @@ function App() {
             <div className="d-flex align-items-center">
               <div className="bg-primary rounded-circle p-2 me-3"><User size={24} className="text-white" /></div>
               <div>
-                <h4 className="fw-bold text-dark mb-0">Welcome back, Prakash</h4>
-                <small className="text-muted"><ShieldCheck size={12} className="text-success" /> Verified Account • Buffalo, NY</small>
+                <h4 className="fw-bold text-dark mb-0">Welcome back</h4>
+                <small className="text-muted"><ShieldCheck size={12} className="text-success" /> {user.email}</small>
               </div>
             </div>
-            <button onClick={fetchData} className="btn btn-primary rounded-pill px-4 fw-bold shadow-sm">
-              <RefreshCw size={16} className={`me-2 ${isSyncing ? 'animate-spin' : ''}`} /> Sync Hub
-            </button>
+            <div className="d-flex gap-2 align-items-center">
+              <button type="button" onClick={logout} className="btn btn-outline-secondary rounded-pill px-3 btn-sm">
+                <LogOut size={16} className="me-1" /> Log out
+              </button>
+              <button onClick={fetchData} className="btn btn-primary rounded-pill px-4 fw-bold shadow-sm">
+                <RefreshCw size={16} className={`me-2 ${isSyncing ? 'animate-spin' : ''}`} /> Sync Hub
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -298,11 +425,11 @@ function App() {
                           <td colSpan="6"><div className="d-flex align-items-center">
                             <input type="date" className="form-control form-control-sm me-1" value={editExpData.date} onChange={e => setEditExpData({...editExpData, date: e.target.value})} />
                             <select className="form-select form-select-sm" value={editExpData.category} onChange={e => setEditExpData({...editExpData, category: e.target.value})}>
-                                <option>Food</option><option>Home</option><option>CC Bills</option>...
+                              <option>Food</option><option>Home</option><option>CC Bills</option><option>Subscription</option><option>Shopping</option><option>Travel</option><option>Entertainment</option><option>Health</option><option>Other</option>
                             </select>
-                            <select className="form-select form-select-sm" value={editExpData.payment_method} 
+                            <select className="form-select form-select-sm" value={editExpData.payment_method}
                                 onChange={e => setEditExpData({...editExpData, payment_method: e.target.value})}>
-                                <option value="LIQ">LIQ</option><option value="DC BOFA">DC BOFA</option>...
+                              <option value="LIQ">LIQ</option><option value="DC BOFA">DC BOFA</option><option value="DC CHASE">DC CHASE</option><option value="CC : Amex">CC : Amex</option><option value="CC : BOFA">CC : BOFA</option><option value="CC : Chase">CC : Chase</option><option value="CC : Discover">CC : Discover</option>
                             </select>
                             <input className="form-control form-control-sm me-1" value={editExpData.description} onChange={e => setEditExpData({...editExpData, description: e.target.value})} />
                             <input type="number" className="form-control form-control-sm me-1" value={editExpData.amount} onChange={e => setEditExpData({...editExpData, amount: e.target.value})} />

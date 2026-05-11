@@ -1,22 +1,20 @@
-import pandas as pd
 import os
-from datetime import datetime
 
-CSV_PATH = '../data/expenses.csv'
+import pandas as pd
+
+import database as db
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 
 def init_db():
-    if not os.path.exists(CSV_PATH):
-        df = pd.DataFrame(columns=['id', 'date', 'category', 'description', 'amount', 'payment_method'])
-        df.to_csv(CSV_PATH, index=False)
+    db.init_db()
 
-def get_df():
-    return pd.read_csv(CSV_PATH)
 
-def save_expense(data):
-    df = get_df()
-    new_id = int(df['id'].max() + 1) if not df.empty else 1
-    data['id'] = new_id
-    new_row = pd.DataFrame([data])
-    df = pd.concat([df, new_row], ignore_index=True)
-    df.to_csv(CSV_PATH, index=False)
-    return data
+def get_df(user_id: int):
+    return pd.DataFrame(db.expenses_list(user_id))
+
+
+def save_expense(data, user_id: int):
+    new_id = db.expense_add(user_id, data)
+    return {**data, "id": new_id}

@@ -1,0 +1,22 @@
+# Simple spacebar counter in Python
+# Press SPACE to increase the count
+# Press ESC to exit
+
+import keyboard
+
+count = 0
+
+print("Press SPACE to increase the count")
+print("Press ESC to quit\n")
+
+while True:
+    event = keyboard.read_event()
+
+    if event.event_type == keyboard.KEY_DOWN:
+        if event.name == "space":
+            count += 1
+            print(f"Count: {count}")
+
+        elif event.name == "esc":
+            print("\nExiting...")
+            break

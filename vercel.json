@@ -1,0 +1,9 @@
+{
+  "version": 2,
+  "buildCommand": "cd frontend && npm ci && npm run build",
+  "outputDirectory": "frontend/build",
+  "installCommand": "pip install -r requirements.txt",
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api/backend" }
+  ]
+}

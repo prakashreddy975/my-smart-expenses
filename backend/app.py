@@ -1,172 +1,179 @@
-from flask import Flask, jsonify, request, make_response
-from flask_cors import CORS
-import pandas as pd
 import os
 
+from flask import Flask, jsonify, request
+from flask_cors import CORS
+from werkzeug.security import check_password_hash, generate_password_hash
+
+import database as db
+from auth import create_token, require_auth
+
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": "*"}})
+app.config.setdefault(
+    "SECRET_KEY",
+    os.environ.get("FLASK_SECRET_KEY", "dev-flask-secret-change-me"),
+)
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CSV_PATH = os.path.join(BASE_DIR, 'expenses.csv')
+_cors_origins = os.environ.get("CORS_ORIGINS", "").strip()
+_cors_kw = {
+    "allow_headers": ["Content-Type", "Authorization"],
+    "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+}
+if _cors_origins and _cors_origins != "*":
+    _cors_kw["origins"] = [o.strip() for o in _cors_origins.split(",") if o.strip()]
+else:
+    _cors_kw["origins"] = "*"
 
-def get_fresh_data():
-    if not os.path.exists(CSV_PATH):
-        df = pd.DataFrame(columns=['id', 'date', 'category', 'description', 'amount' , 'payment_method'])
-        df.to_csv(CSV_PATH, index=False)
-    df = pd.read_csv(CSV_PATH)
-    return df.fillna('') # Critical: Replaces empty/NaN with ""
+CORS(app, resources={r"/api/*": _cors_kw})
 
-@app.route('/api/expenses', methods=['GET'])
+db.init_db()
+
+
+# --- auth (public) ---
+
+
+@app.route("/api/auth/register", methods=["POST"])
+def register():
+    data = request.json or {}
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
+    if not email or "@" not in email:
+        return jsonify({"error": "Invalid email"}), 400
+    if len(password) < 8:
+        return jsonify({"error": "Password must be at least 8 characters"}), 400
+    try:
+        uid = db.user_create(email, generate_password_hash(password))
+    except ValueError:
+        return jsonify({"error": "Email already registered"}), 409
+    token = create_token(uid, email)
+    return jsonify({"token": token, "user": {"id": uid, "email": email}}), 201
+
+
+@app.route("/api/auth/login", methods=["POST"])
+def login():
+    data = request.json or {}
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
+    row = db.user_by_email(email)
+    if row is None or not check_password_hash(row["password_hash"], password):
+        return jsonify({"error": "Invalid email or password"}), 401
+    uid = int(row["id"])
+    token = create_token(uid, email)
+    return jsonify({"token": token, "user": {"id": uid, "email": email}})
+
+
+@app.route("/api/auth/me", methods=["GET"])
+@require_auth
+def me():
+    row = db.user_by_id(request.auth_user_id)
+    if row is None:
+        return jsonify({"error": "User not found"}), 404
+    return jsonify({"id": int(row["id"]), "email": row["email"]})
+
+
+# --- expenses ---
+
+
+@app.route("/api/expenses", methods=["GET"])
+@require_auth
 def get_expenses():
-    df = get_fresh_data()
-    return jsonify(df.to_dict(orient='records'))
+    return jsonify(db.expenses_list(request.auth_user_id))
 
-@app.route('/api/expenses', methods=['POST'])
+
+@app.route("/api/expenses", methods=["POST"])
+@require_auth
 def add_expense():
     data = request.json
-    df = get_fresh_data()
-    new_id = int(df['id'].max() + 1) if not df.empty else 1
-    new_row = pd.DataFrame([{
-        'id': new_id,
-        'date': data.get('date'),
-        'category': data.get('category'),
-        'description': data.get('description', ''),
-        'payment_method': data.get('payment_method', ''),
-        'amount': float(data.get('amount', 0))
-    }])
-    df = pd.concat([df, new_row], ignore_index=True)
-    df.to_csv(CSV_PATH, index=False)
+    db.expense_add(request.auth_user_id, data)
     return jsonify({"status": "success"}), 201
 
-@app.route('/api/expenses/<int:id>', methods=['DELETE'])
+
+@app.route("/api/expenses/<int:id>", methods=["DELETE"])
+@require_auth
 def delete_expense(id):
-    df = get_fresh_data()
-    df = df[df['id'] != id]
-    df.to_csv(CSV_PATH, index=False)
+    db.expense_delete(request.auth_user_id, id)
     return jsonify({"status": "deleted"}), 200
 
-@app.route('/api/analytics', methods=['GET'])
+
+@app.route("/api/analytics", methods=["GET"])
+@require_auth
 def get_analytics():
-    df = get_fresh_data()
-    if df.empty: return jsonify({"total": 0, "categories": {}})
-    total = float(df['amount'].sum())
-    cats = df.groupby('category')['amount'].sum().to_dict()
-    return jsonify({"total": total, "categories": cats})
+    total, categories = db.expenses_analytics(request.auth_user_id)
+    if total == 0 and not categories:
+        return jsonify({"total": 0, "categories": {}})
+    return jsonify({"total": total, "categories": categories})
 
 
-## Banks
-
-BANK_CSV_PATH = os.path.join(BASE_DIR, 'banks.csv')
-
-def get_bank_data():
-    if not os.path.exists(BANK_CSV_PATH):
-        pd.DataFrame(columns=['id', 'bank_name', 'balance']).to_csv(BANK_CSV_PATH, index=False)
-    return pd.read_csv(BANK_CSV_PATH).fillna('')
-
-@app.route('/api/banks', methods=['GET'])
-def get_banks():
-    return jsonify(get_bank_data().to_dict(orient='records'))
-
-@app.route('/api/banks', methods=['POST'])
-def add_bank():
-    data = request.json
-    df = get_bank_data()
-    new_id = int(df['id'].max() + 1) if not df.empty else 1
-    new_row = pd.DataFrame([{
-        'id': new_id,
-        'bank_name': data.get('bank_name'),
-        'balance': float(data.get('balance', 0))
-    }])
-    df = pd.concat([df, new_row], ignore_index=True)
-    df.to_csv(BANK_CSV_PATH, index=False)
-    return jsonify({"status": "success"}), 201
-
-@app.route('/api/banks/<int:id>', methods=['DELETE'])
-def delete_bank(id):
-    df = get_bank_data()
-    df = df[df['id'] != id]
-    df.to_csv(BANK_CSV_PATH, index=False)
-    return jsonify({"status": "deleted"}), 200
-
-## Update
-
-# --- UPDATE EXPENSE ---
-@app.route('/api/expenses/<int:id>', methods=['PUT'])
+@app.route("/api/expenses/<int:id>", methods=["PUT"])
+@require_auth
 def update_expense(id):
     data = request.json
-    df = get_fresh_data()
-    if id in df['id'].values:
-        df.loc[df['id'] == id, ['date', 'category', 'description', 'amount', 'payment_method']] = [
-            data.get('date'), data.get('category'), 
-            data.get('description'), float(data.get('amount')),
-            data.get('payment_method')
-        ]
-        df.to_csv(CSV_PATH, index=False)
+    if db.expense_update(request.auth_user_id, id, data):
         return jsonify({"status": "updated"}), 200
     return jsonify({"error": "Not found"}), 404
 
-# --- UPDATE BANK ---
-@app.route('/api/banks/<int:id>', methods=['PUT'])
-def update_bank(id):
+
+# --- banks ---
+
+
+@app.route("/api/banks", methods=["GET"])
+@require_auth
+def get_banks():
+    return jsonify(db.banks_list(request.auth_user_id))
+
+
+@app.route("/api/banks", methods=["POST"])
+@require_auth
+def add_bank():
     data = request.json
-    df = get_bank_data()
-    if id in df['id'].values:
-        df.loc[df['id'] == id, ['bank_name', 'balance']] = [
-            data.get('bank_name'), float(data.get('balance'))
-        ]
-        df.to_csv(BANK_CSV_PATH, index=False)
-        return jsonify({"status": "updated"}), 200
-    return jsonify({"error": "Not found"}), 404
+    db.bank_add(request.auth_user_id, data)
+    return jsonify({"status": "success"}), 201
 
 
-
-## Credit cards
-BILL_CSV = os.path.join(BASE_DIR, 'credit_bills.csv')
-
-def get_bill_data():
-    if not os.path.exists(BILL_CSV):
-        pd.DataFrame(columns=['id', 'card_name', 'bill_date', 'bill_amount', 'paid_amount', 'paid_date', 'from_bank']).to_csv(BILL_CSV, index=False)
-    return pd.read_csv(BILL_CSV).fillna('')
-
-@app.route('/api/bills', methods=['GET', 'POST'])
-def handle_bills():
-    if request.method == 'POST':
-        data = request.json
-        df = get_bill_data()
-        new_id = int(df['id'].max() + 1) if not df.empty else 1
-        new_row = pd.DataFrame([{**data, 'id': new_id}])
-        df = pd.concat([df, new_row], ignore_index=True)
-        df.to_csv(BILL_CSV, index=False)
-        return jsonify({"status": "success"}), 201
-    return jsonify(get_bill_data().to_dict(orient='records'))
-
-# --- UPDATE BILL ---
-@app.route('/api/bills/<int:id>', methods=['PUT'])
-def update_bill(id):
-    data = request.json
-    df = get_bill_data()
-
-    if id in df['id'].values:
-
-        df.loc[df['id'] == id, 'card_name'] = data.get('card_name', '')
-        df.loc[df['id'] == id, 'bill_date'] = data.get('bill_date', '')
-        df.loc[df['id'] == id, 'paid_date'] = data.get('paid_date', '')
-        df.loc[df['id'] == id, 'from_bank'] = data.get('from_bank', '')
-
-        df.loc[df['id'] == id, 'bill_amount'] = float(data.get('bill_amount', 0))
-        df.loc[df['id'] == id, 'paid_amount'] = float(data.get('paid_amount', 0))
-
-        df.to_csv(BILL_CSV, index=False)
-
-        return jsonify({"status": "updated"}), 200
-
-    return jsonify({"error": "Not found"}), 404
-
-@app.route('/api/bills/<int:id>', methods=['DELETE'])
-def delete_bill(id):
-    df = get_bill_data()
-    df = df[df['id'] != id].to_csv(BILL_CSV, index=False)
+@app.route("/api/banks/<int:id>", methods=["DELETE"])
+@require_auth
+def delete_bank(id):
+    db.bank_delete(request.auth_user_id, id)
     return jsonify({"status": "deleted"}), 200
 
-if __name__ == '__main__':
-    app.run(debug=True, host='127.0.0.1', port=5001)
+
+@app.route("/api/banks/<int:id>", methods=["PUT"])
+@require_auth
+def update_bank(id):
+    data = request.json
+    if db.bank_update(request.auth_user_id, id, data):
+        return jsonify({"status": "updated"}), 200
+    return jsonify({"error": "Not found"}), 404
+
+
+# --- bills ---
+
+
+@app.route("/api/bills", methods=["GET", "POST"])
+@require_auth
+def handle_bills():
+    uid = request.auth_user_id
+    if request.method == "POST":
+        data = request.json
+        db.bill_add(uid, data)
+        return jsonify({"status": "success"}), 201
+    return jsonify(db.bills_list(uid))
+
+
+@app.route("/api/bills/<int:id>", methods=["PUT"])
+@require_auth
+def update_bill(id):
+    data = request.json
+    if db.bill_update(request.auth_user_id, id, data):
+        return jsonify({"status": "updated"}), 200
+    return jsonify({"error": "Not found"}), 404
+
+
+@app.route("/api/bills/<int:id>", methods=["DELETE"])
+@require_auth
+def delete_bill(id):
+    db.bill_delete(request.auth_user_id, id)
+    return jsonify({"status": "deleted"}), 200
+
+
+if __name__ == "__main__":
+    app.run(debug=True, host="127.0.0.1", port=5001)
